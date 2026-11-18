@@ -44,7 +44,7 @@ export default function App() {
 
   if (!state) return <div className="loading">Connecting to the digital twin…</div>;
   const { rooms, assets, alerts, kpis } = state;
-  const ids = [...rooms.map(r => r.id), ...assets.map(a => a.id)];
+  const ids = [...rooms.filter(r => r.type === "patient").map(r => r.id), ...assets.map(a => a.id)];
 
   return (
     <div className="app">
@@ -56,6 +56,8 @@ export default function App() {
         <Kpi label="Asset availability %" value={kpis.assetAvailability} />
         <Kpi label="Wheelchair utilization %" value={kpis.wheelchairUtil} />
         <Kpi label="Messages received" value={kpis.received} />
+        <Kpi label="Avg latency (ms)" value={kpis.latencyAvgMs} />
+<Kpi label="Corrupt msgs rejected" value={kpis.rejected} />
         <Kpi label="Bad fields dropped" value={kpis.dropped_fields} />
       </section>
 

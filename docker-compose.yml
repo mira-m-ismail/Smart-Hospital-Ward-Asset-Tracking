@@ -1,0 +1,34 @@
+services:
+  mosquitto:
+    image: eclipse-mosquitto:2
+    ports: ["1883:1883"]
+    volumes:
+      - ./mosquitto/mosquitto.conf:/mosquitto/config/mosquitto.conf
+
+  memgraph:
+    image: memgraph/memgraph-mage
+    ports: ["7687:7687"]
+
+  lab:                      # graph viewer
+    image: memgraph/lab
+    ports: ["3000:3000"]
+    environment:
+      - QUICK_CONNECT_MG_HOST=memgraph
+      - QUICK_CONNECT_MG_PORT=7687
+    depends_on: [memgraph]
+
+  backend:
+    build: ./backend
+    ports: ["8000:8000"]
+    environment:
+      - MQTT_HOST=mosquitto
+      - MG_HOST=memgraph
+    depends_on: [mosquitto, memgraph]
+    restart: on-failure
+
+  simulator:
+    build: ./simulator
+    environment:
+      - MQTT_HOST=mosquitto
+    depends_on: [mosquitto, backend]
+    restart: on-failure

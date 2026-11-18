@@ -1,0 +1,6 @@
+fastapi
+uvicorn[standard]
+paho-mqtt>=2.0
+neo4j
+scikit-learn
+numpy

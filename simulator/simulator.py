@@ -17,6 +17,10 @@ client.loop_start()
 
 
 def pub(topic, payload):
+    payload = {**payload, "sent_ts": time.time()}            # lets the twin measure end-to-end latency
+    if random.random() < 0.005:                              # inject a corrupt (non-JSON) message to test rejection
+        client.publish(f"hospital/ward1/{topic}", "{corrupt-payload")
+        return
     client.publish(f"hospital/ward1/{topic}", json.dumps(payload))
 
 

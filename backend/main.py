@@ -40,8 +40,12 @@ last_seen, location = {}, {a[0]: a[2] for a in ASSETS}
 active = {}                                        # (entity, rule) -> alert id
 util = defaultdict(lambda: [0, 0])                 # wheelchair in-use samples / total
 stats = {"received": 0, "rejected": 0, "dropped_fields": 0}
+latencies = deque(maxlen=500)                      # end-to-end ms: simulator publish -> graph updated
+STARTED = time.time()
 lock = threading.Lock()
 
+# Operating targets (stored on Room nodes as "target" properties and used by the rule engine)
+THRESH = {"temp_min": 19, "temp_max": 26, "humidity_max": 60, "co2_max": 1000}
 RANGES = {"temperature": (5, 50), "humidity": (0, 100), "co2": (300, 5000),
           "battery": (0, 100), "flow_rate": (0, 500), "remaining_ml": (0, 2000),
           "respiratory_rate": (0, 60), "tidal_volume": (0, 1500)}
@@ -62,10 +66,13 @@ def seed():
     run("CREATE (:Ward {id:'W1', name:'Ward 3 North', floor:3})")
     for rid, name, typ in ROOMS:
         run("MATCH (w:Ward {id:'W1'}) CREATE (w)-[:CONTAINS]->"
-            "(:Room {id:$id, name:$name, type:$typ, alertStatus:false, comfortIndex:100.0})",
-            id=rid, name=name, typ=typ)
+            "(:Room {id:$id, name:$name, type:$typ, alertStatus:false, comfortIndex:100.0, "
+            "targetTempMin:$tmin, targetTempMax:$tmax, targetHumidityMax:$hmax, targetCo2Max:$cmax})",
+            id=rid, name=name, typ=typ, tmin=THRESH["temp_min"], tmax=THRESH["temp_max"],
+            hmax=THRESH["humidity_max"], cmax=THRESH["co2_max"])
         if typ == "patient":
-            run("MATCH (r:Room {id:$rid}) CREATE (r)-[:HAS_SENSOR]->(:EnvSensor {id:$sid})",
+            run("MATCH (r:Room {id:$rid}) CREATE (r)-[:HAS_SENSOR]->"
+                "(:EnvSensor {id:$sid, model:'DHT22+MH-Z19', measures:'temperature,humidity,co2', online:false})",
                 rid=rid, sid=f"ENV-{rid}")
     for pid, rid in PATIENTS:
         run("MATCH (r:Room {id:$rid}) CREATE (:Patient {id:$pid})-[:ADMITTED_TO]->(r)", rid=rid, pid=pid)
@@ -111,10 +118,10 @@ def set_alert(eid, rule, on, msg="", sev="warning"):
 def analyze_room(rid, p):
     t, h, c = p.get("temperature"), p.get("humidity"), p.get("co2")
     rules = {
-        "TEMP_HIGH": (t is not None and t > 26, f"Temperature {t}°C above 26°C", "warning"),
-        "TEMP_LOW": (t is not None and t < 19, f"Temperature {t}°C below 19°C", "warning"),
-        "HUMIDITY_HIGH": (h is not None and h > 60, f"Humidity {h}% above 60%", "warning"),
-        "CO2_HIGH": (c is not None and c > 1000, f"CO2 {c} ppm above 1000", "critical"),
+        "TEMP_HIGH": (t is not None and t > THRESH["temp_max"], f"Temperature {t}°C above {THRESH['temp_max']}°C", "warning"),
+        "TEMP_LOW": (t is not None and t < THRESH["temp_min"], f"Temperature {t}°C below {THRESH['temp_min']}°C", "warning"),
+        "HUMIDITY_HIGH": (h is not None and h > THRESH["humidity_max"], f"Humidity {h}% above {THRESH['humidity_max']}%", "warning"),
+        "CO2_HIGH": (c is not None and c > THRESH["co2_max"], f"CO2 {c} ppm above {THRESH['co2_max']}", "critical"),
     }
     for rule, (on, msg, sev) in rules.items():
         set_alert(rid, rule, on, msg, sev)
@@ -155,7 +162,7 @@ def analyze_asset(aid, kind, p):
         rem, flow = p.get("remaining_ml"), p.get("flow_rate")
         if rem is not None and flow:
             d["timeToEmptyMin"] = round(rem / flow * 60, 1)
-            rules["INFUSION_LOW"] = (d["timeToEmptyMin"] < 10, f"Bag empty in {d['timeToEmptyMin']} min*", "critical")
+            rules["INFUSION_LOW"] = (d["timeToEmptyMin"] < 10, f"Bag empty in {d['timeToEmptyMin']} min", "critical")
         rules["OCCLUSION"] = (p.get("occlusion") is True, "Line occlusion detected", "critical")
     if kind == "Ventilator":
         rr = p.get("respiratory_rate")
@@ -183,15 +190,18 @@ def handle(topic, payload):
         stats["rejected"] += 1; return
     stats["received"] += 1
     now = time.time()
+    sent = raw.pop("sent_ts", None)
     p = clean(raw)
     with lock:
         rid = p.pop("room_id", None)
         latest[eid].update(p)
-        series[eid].append({"ts": now, **p})
+        series[eid].append({"ts": now, **{k: int(v) if isinstance(v, bool) else v for k, v in p.items()}})
         last_seen[eid] = now
         if kind == "room" and eid in ROOM_IDS:
             props = {**p, **analyze_room(eid, latest[eid]), "lastUpdate": now}
             run("MATCH (r:Room {id:$id}) SET r += $props", id=eid, props=props)
+            run("MATCH (s:EnvSensor {id:$sid}) SET s.online=true, s.lastUpdate=$now", sid=f"ENV-{eid}", now=now)
+            
         elif kind == "asset" and eid in ASSET_KIND:
             props = {**p, **analyze_asset(eid, ASSET_KIND[eid], latest[eid]), "online": True, "lastUpdate": now}
             run("MATCH (a:Asset {id:$id}) SET a += $props", id=eid, props=props)
@@ -199,6 +209,8 @@ def handle(topic, payload):
                 location[eid] = rid
                 run("MATCH (a:Asset {id:$id})-[l:LOCATED_IN]->() DELETE l WITH a "
                     "MATCH (r:Room {id:$rid}) CREATE (a)-[:LOCATED_IN]->(r)", id=eid, rid=rid)
+        if isinstance(sent, (int, float)):
+            latencies.append((time.time() - sent) * 1000)
 
 
 def watchdog():
@@ -251,6 +263,7 @@ def state():
         "assetAvailability": round(100 * sum(1 for a in assets if a.get("online") and not a.get("alertStatus")) / max(1, len(assets)), 1),
         "wheelchairUtil": round(sum(a["utilization"] for a in wcs) / len(wcs), 1) if wcs else 0,
         **stats,
+        "latencyAvgMs": round(sum(latencies) / len(latencies), 1) if latencies else 0,
     }
     return {"rooms": rooms, "assets": assets, "alerts": alerts, "kpis": kpis}
 
@@ -268,3 +281,31 @@ def graph():
 @app.get("/api/timeseries/{eid}")
 def timeseries(eid: str):
     return list(series[eid])[-120:]
+
+
+@app.get("/api/health")
+def health():
+    try:
+        run("RETURN 1"); g = True
+    except Exception:
+        g = False
+    return {"status": "ok" if g else "degraded", "graph": g, "uptimeSec": round(time.time() - STARTED)}
+
+
+@app.get("/api/metrics")
+def metrics():
+    """Success metrics used in the validation section of the report."""
+    up = max(1, time.time() - STARTED)
+    lat = sorted(latencies)
+    total = stats["received"] + stats["rejected"]
+    sev = {r["sev"]: r["n"] for r in run("MATCH (a:Alert) WHERE a.active=true RETURN a.severity AS sev, count(a) AS n")}
+    online = run("MATCH (a:Asset) RETURN sum(CASE WHEN a.online THEN 1 ELSE 0 END) AS on, count(a) AS n")[0]
+    return {
+        "uptimeSec": round(up), "messagesReceived": stats["received"], "messagesRejected": stats["rejected"],
+        "fieldsDropped": stats["dropped_fields"], "msgPerSec": round(stats["received"] / up, 2),
+        "rejectRatePct": round(100 * stats["rejected"] / total, 2) if total else 0,
+        "latencyMs": {"avg": round(sum(lat) / len(lat), 1) if lat else None,
+                      "p95": round(lat[int(0.95 * (len(lat) - 1))], 1) if lat else None,
+                      "max": round(lat[-1], 1) if lat else None, "samples": len(lat)},
+        "activeAlertsBySeverity": sev, "assetsOnline": online["on"], "assetsTotal": online["n"],
+    }

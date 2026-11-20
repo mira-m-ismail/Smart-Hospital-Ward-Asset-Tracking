@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { CartesianGrid, Line, LineChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import ForceGraph2D from "react-force-graph-2d";
 import "./App.css";
@@ -29,6 +29,28 @@ export default function App() {
   const graph = usePoll(`${API}/graph`, 5000);
   const [sel, setSel] = useState("R101");
   const [metric, setMetric] = useState("temperature");
+    const [theme, setTheme] = useState(
+    () => localStorage.getItem("ward-theme") || "dark"
+  );
+  const graphWrapRef = useRef(null);
+  const [graphWidth, setGraphWidth] = useState(900);
+
+  useEffect(() => {
+    document.documentElement.dataset.theme = theme;
+    localStorage.setItem("ward-theme", theme);
+  }, [theme]);
+
+  useEffect(() => {
+    const element = graphWrapRef.current;
+    if (!element) return;
+
+    const observer = new ResizeObserver(([entry]) => {
+      setGraphWidth(Math.floor(entry.contentRect.width));
+    });
+
+    observer.observe(element);
+    return () => observer.disconnect();
+  }, []);
   const series = usePoll(`${API}/timeseries/${sel}`) || [];
 
   const last = series[series.length - 1] || {};
@@ -48,7 +70,18 @@ export default function App() {
 
   return (
     <div className="app">
-      <header><h1>🏥 Ward 3 North, Digital Twin</h1><span className="live">● LIVE</span></header>
+            <header>
+        <h1> Ward 3 North, Digital Twin</h1>
+        <div className="header-actions">
+          <button
+            className="theme-toggle"
+            onClick={() => setTheme(theme === "dark" ? "light" : "dark")}
+          >
+            {theme === "dark" ? "☀ Light mode" : "☾ Dark mode"}
+          </button>
+          <span className="live">● LIVE</span>
+        </div>
+      </header>
 
       <section className="kpis">
         <Kpi label="Active alerts" value={kpis.activeAlerts} />
@@ -63,10 +96,14 @@ export default function App() {
 
       <div className="grid">
         <section className="card">
-          <h2>Ward floor (click an item to chart it)</h2>
+          <h2>Ward layout · select a patient room or asset to chart it</h2>
           <div className="rooms">
             {rooms.map(r => (
-              <div key={r.id} className={`room ${r.alertStatus ? "bad" : ""}`} onClick={() => setSel(r.id)}>
+              <div
+  key={r.id}
+  className={`room ${r.alertStatus ? "bad" : ""} ${r.type === "patient" ? "selectable" : ""} ${sel === r.id ? "selected" : ""}`}
+  onClick={r.type === "patient" ? () => setSel(r.id) : undefined}
+>
                 <b>{r.name}</b>
                 {r.type === "patient" && (
                   <div className="env">
@@ -76,7 +113,7 @@ export default function App() {
                 )}
                 <div className="chips">
                   {assets.filter(a => a.room === r.id).map(a => (
-                    <span key={a.id} className={`chip ${a.alertStatus || !a.online ? "bad" : ""}`}
+                    <span key={a.id} className={`chip ${a.alertStatus || !a.online ? "bad" : ""} ${sel === a.id ? "selected" : ""}`}
                       onClick={e => { e.stopPropagation(); setSel(a.id); }}
                       title={JSON.stringify(a, null, 1)}>
                       {ICON[a.type]} {a.id}
@@ -95,14 +132,34 @@ export default function App() {
           <h2>Alerts</h2>
           <div className="alerts">
             {alerts.length === 0 && <div className="small">No alerts yet</div>}
-            {alerts.map(a => (
-              <div key={a.id} className={`alert ${a.active ? a.severity : "resolved"}`}>
-                <b>{a.entity}</b> · {a.rule}<br />
-                <span className="small">{a.message} · {new Date(a.ts * 1000).toLocaleTimeString()}
-                  {!a.active && " · resolved"}</span>
-              </div>
-            ))}
-          </div>
+            {alerts.map(a => {
+  const isRecent = a.active && Date.now() / 1000 - a.ts < 300;
+
+  return (
+    <div
+      key={a.id}
+      className={`alert ${a.active ? a.severity : "resolved"}`}
+    >
+            <div className="alert-topline">
+        <b>{a.entity}</b>
+        <span className="alert-rule">{a.rule}</span>
+        <span className={`alert-badge ${a.severity || "warning"}`}>
+          {(a.severity || "warning").toUpperCase()}
+        </span>
+        {!a.active && (
+          <span className="alert-badge resolved-badge">RESOLVED</span>
+        )}
+        {isRecent && <span className="alert-new">NEW</span>}
+      </div>
+
+      <p className="alert-message">{a.message}</p>
+
+            <div className="alert-meta">
+        {new Date(a.ts * 1000).toLocaleTimeString()}
+      </div>
+    </div>
+  );
+})}          </div>
         </section>
       </div>
 
@@ -114,20 +171,54 @@ export default function App() {
         </h2>
         <ResponsiveContainer width="100%" height={260}>
           <LineChart data={chartData}>
-            <CartesianGrid strokeDasharray="3 3" stroke="#334155" />
-            <XAxis dataKey="time" stroke="#94a3b8" minTickGap={40} />
-            <YAxis stroke="#94a3b8" domain={["auto", "auto"]} />
-            <Tooltip />
-            <Line type="monotone" dataKey={m} stroke="#38bdf8" dot={false} isAnimationActive={false} />
+            <CartesianGrid
+  strokeDasharray="3 3"
+  stroke={theme === "dark" ? "#303832" : "#dedbd0"}
+/>
+<XAxis
+  dataKey="time"
+  stroke={theme === "dark" ? "#a5ada6" : "#687168"}
+  minTickGap={40}
+/>
+<YAxis
+  stroke={theme === "dark" ? "#a5ada6" : "#687168"}
+  domain={["auto", "auto"]}
+/>
+<Tooltip
+  contentStyle={{
+    backgroundColor: theme === "dark" ? "#171a18" : "#fffdf8",
+    borderColor: theme === "dark" ? "#2b332e" : "#dedbd0",
+    borderRadius: 12,
+    color: theme === "dark" ? "#f3f5f0" : "#20261f"
+  }}
+/>
+<Line
+  type="monotone"
+  dataKey={m}
+  stroke={theme === "dark" ? "#b6f36a" : "#176b4b"}
+  dot={false}
+  isAnimationActive={false}
+/>
           </LineChart>
         </ResponsiveContainer>
       </section>
 
       <section className="card">
         <h2>Knowledge graph (live from Memgraph)</h2>
-        <ForceGraph2D graphData={gdata} width={1000} height={440} backgroundColor="#0f172a"
-          nodeLabel="name" nodeRelSize={6} nodeColor={n => COLORS[n.label] || "#999"}
-          linkLabel="type" linkDirectionalArrowLength={4} linkColor={() => "#64748b"} />
+        <div className="graph-wrap" ref={graphWrapRef}>
+          <ForceGraph2D
+            graphData={gdata}
+            width={graphWidth}
+            height={Math.min(520, Math.max(280, graphWidth * 0.5))}
+            backgroundColor={theme === "dark" ? "#101311" : "#fffdf8"}
+            nodeLabel="name"
+            nodeRelSize={6}
+            nodeColor={n => COLORS[n.label] || "#999"}
+            linkLabel="type"
+            linkDirectionalArrowLength={4}
+            linkColor={() => theme === "dark" ? "#64748b" : "#94a3b8"}
+          />
+        </div>
         <div className="legend">{Object.entries(COLORS).map(([k, c]) =>
           <span key={k}><i style={{ background: c }} />{k}</span>)}</div>
       </section>

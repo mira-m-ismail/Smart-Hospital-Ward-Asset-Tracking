@@ -30,5 +30,7 @@ services:
     build: ./simulator
     environment:
       - MQTT_HOST=mosquitto
+      - BATTERY_DRAIN_SCALE=0.1
+      - BATTERY_ALERT_DEMO=true
     depends_on: [mosquitto, backend]
     restart: on-failure

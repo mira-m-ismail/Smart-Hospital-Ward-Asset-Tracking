@@ -103,7 +103,7 @@ def clean(d):
 
 
 # ---------- Alerts ----------
-def set_alert(eid, rule, on, msg="", sev="warning"):
+def set_alert(eid, rule, on, msg="", sev="warning", resolved_msg=""):
     key = (eid, rule)
     if on and key not in active:
         aid = uuid.uuid4().hex[:8]
@@ -111,7 +111,9 @@ def set_alert(eid, rule, on, msg="", sev="warning"):
         run("MATCH (e {id:$eid}) CREATE (a:Alert {id:$aid, rule:$rule, message:$msg, severity:$sev, "
             "active:true, ts:$ts})-[:RAISED_FOR]->(e)", eid=eid, aid=aid, rule=rule, msg=msg, sev=sev, ts=time.time())
     elif not on and key in active:
-        run("MATCH (a:Alert {id:$aid}) SET a.active=false, a.resolvedTs=$ts", aid=active.pop(key), ts=time.time())
+        run("MATCH (a:Alert {id:$aid}) SET a.active=false, a.resolvedTs=$ts, "
+            "a.message=CASE WHEN $resolvedMsg <> '' THEN $resolvedMsg ELSE a.message END",
+            aid=active.pop(key), ts=time.time(), resolvedMsg=resolved_msg)
 
 
 # ---------- Analytics ----------
@@ -123,8 +125,14 @@ def analyze_room(rid, p):
         "HUMIDITY_HIGH": (h is not None and h > THRESH["humidity_max"], f"Humidity {h}% above {THRESH['humidity_max']}%", "warning"),
         "CO2_HIGH": (c is not None and c > THRESH["co2_max"], f"CO2 {c} ppm above {THRESH['co2_max']}", "critical"),
     }
+    resolved_messages = {
+        "TEMP_HIGH": f"Resolved: temperature is now {t:.1f}°C (high threshold: >{THRESH['temp_max']}°C)." if t is not None else "",
+        "TEMP_LOW": f"Resolved: temperature is now {t:.1f}°C (low threshold: <{THRESH['temp_min']}°C)." if t is not None else "",
+        "HUMIDITY_HIGH": f"Resolved: humidity is now {h:.1f}% (limit: {THRESH['humidity_max']}%)." if h is not None else "",
+        "CO2_HIGH": f"Resolved: CO₂ is now {c:.0f} ppm (limit: {THRESH['co2_max']} ppm)." if c is not None else "",
+    }
     for rule, (on, msg, sev) in rules.items():
-        set_alert(rid, rule, on, msg, sev)
+        set_alert(rid, rule, on, msg, sev, resolved_messages[rule])
     penalty = (abs(t - 22) * 5 if t is not None else 0) + (max(0, h - 50) * 0.5 if h is not None else 0) \
         + (max(0, c - 800) * 0.05 if c is not None else 0)
     return {"comfortIndex": round(max(0, 100 - penalty), 1),                 # derived property
@@ -157,7 +165,13 @@ def analyze_asset(aid, kind, p):
         if eta is not None:
             d["batteryEtaMin"] = eta
         rules["BATTERY_LOW"] = (b < 20, f"Battery at {b}%", "warning")
+        rules["BATTERY_CRITICAL"] = (b <= 10, f"Battery critically low at {b}%; 10% threshold reached", "critical")
         rules["BATTERY_PREDICTED"] = (eta is not None and eta < 2, f"Predicted to hit 10% in {eta} min", "warning")
+    resolved_messages = {
+        "BATTERY_LOW": f"Resolved: battery is now {b:.1f}% (above the 20% low-battery threshold)." if b is not None else "",
+        "BATTERY_CRITICAL": f"Resolved: battery is now {b:.1f}% (above the 10% critical threshold)." if b is not None else "",
+        "BATTERY_PREDICTED": f"Resolved: battery is now {b:.1f}%; the 10% threshold is no longer predicted within 2 minutes." if b is not None else "",
+    }
     if kind == "InfusionPump":
         rem, flow = p.get("remaining_ml"), p.get("flow_rate")
         if rem is not None and flow:
@@ -171,7 +185,7 @@ def analyze_asset(aid, kind, p):
         u = util[aid]; u[1] += 1; u[0] += int(p["in_use"])
         d["utilization"] = round(100 * u[0] / u[1], 1)
     for rule, (on, msg, sev) in rules.items():
-        set_alert(aid, rule, on, msg, sev)
+        set_alert(aid, rule, on, msg, sev, resolved_messages.get(rule, ""))
     set_alert(aid, "OFFLINE", False)
     d["alertStatus"] = any(v[0] for v in rules.values())
     return d

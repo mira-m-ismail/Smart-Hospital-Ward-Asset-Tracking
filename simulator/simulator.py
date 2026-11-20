@@ -2,6 +2,8 @@ import json, os, random, time
 import paho.mqtt.client as mqtt
 
 HOST, TICK = os.getenv("MQTT_HOST", "localhost"), 2
+BATTERY_DRAIN_SCALE = float(os.getenv("BATTERY_DRAIN_SCALE", "0.1"))
+BATTERY_ALERT_DEMO = os.getenv("BATTERY_ALERT_DEMO", "true").lower() == "true"
 ROOMS = ["R101", "R102", "R103", "R104"]
 PUMPS = {"PUMP-01": "R101", "PUMP-02": "R102", "PUMP-03": "R103", "PUMP-04": "R104"}
 VENTS = {"VENT-01": "R101", "VENT-02": "R102"}
@@ -26,7 +28,7 @@ def pub(topic, payload):
 
 env = {r: {"t": 22 + random.uniform(-1, 1), "h": 45 + random.uniform(-5, 5),
            "c": 600 + random.uniform(-50, 50), "spike": 0} for r in ROOMS}
-pump = {p: {"batt": random.uniform(35, 100), "ml": random.uniform(200, 800),
+pump = {p: {"batt": 19.6 if p == "PUMP-01" and BATTERY_ALERT_DEMO else random.uniform(35, 100), "ml": random.uniform(200, 800),
             "flow": random.choice([50, 75, 100, 125])} for p in PUMPS}
 vent = {v: {"batt": random.uniform(50, 100)} for v in VENTS}
 start = time.time()
@@ -54,7 +56,7 @@ while True:
     # Infusion pumps (time-compressed: batteries/bags drain in minutes, not hours)
     for p, room in PUMPS.items():
         s = pump[p]
-        s["batt"] -= 0.4
+        s["batt"] -= 0.4 * BATTERY_DRAIN_SCALE
         s["ml"] -= s["flow"] / 3600 * TICK * 60
         if s["batt"] < 5: s["batt"] = 100                    # nurse swaps battery
         if s["ml"] <= 0: s["ml"] = random.uniform(300, 800)  # new bag
@@ -64,7 +66,7 @@ while True:
     # Ventilators
     for v, room in VENTS.items():
         s = vent[v]
-        s["batt"] -= 0.15
+        s["batt"] -= 0.15 * BATTERY_DRAIN_SCALE
         if s["batt"] < 5: s["batt"] = 100
         rr = 32 if random.random() < 0.02 else random.gauss(16, 1.5)
         pub(f"asset/{v}/telemetry", {"room_id": room, "battery": round(s["batt"], 1),
